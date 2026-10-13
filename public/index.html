@@ -113,7 +113,9 @@ input[type=text]{font:inherit;color:var(--ink);background:rgba(255,255,255,.05);
 </div>
 <p id="err" hidden>This page needs WebGL and could not load the 3D engine.</p>
 </div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="/vendor/three.min.js"></script>
+<script>window.THREE||document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>')</script>
+
 <script>
 (function(){
 'use strict';
@@ -136,7 +138,7 @@ renderer.outputEncoding=THREE.sRGBEncoding;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.15;
 const scene=new THREE.Scene();
 scene.background=new THREE.Color(0x020202);
-scene.fog=new THREE.FogExp2(0x020202,0.064);
+scene.fog=new THREE.FogExp2(0x020202,0.058);
 const camera=new THREE.PerspectiveCamera(72,1,0.05,60);
 camera.rotation.order='YXZ';scene.add(camera);
 const flash=new THREE.SpotLight(0xfff1d6,0,30,0.52,0.65,1.4);
@@ -144,7 +146,7 @@ flash.position.set(0.18,-0.12,0);flash.castShadow=true;
 flash.shadow.mapSize.set(1024,1024);flash.shadow.camera.near=0.3;flash.shadow.camera.far=30;flash.shadow.bias=-0.0005;
 camera.add(flash);flash.target.position.set(0,0,-6);camera.add(flash.target);
 const face=new THREE.PointLight(0xffe0b0,0,7,2);camera.add(face);
-const ambient=new THREE.AmbientLight(0x30343f,0.45);scene.add(ambient);
+const ambient=new THREE.AmbientLight(0x30343f,0.55);scene.add(ambient);
 const lampLights=[];
 for(let i=0;i<3;i++){const l=new THREE.PointLight(0xffb870,0,15,2);l.userData={lamp:null,cur:0};scene.add(l);lampLights.push(l);}
 function resize(){const w=window.innerWidth,h=window.innerHeight;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
@@ -2112,7 +2114,7 @@ function updateFear(dt){
   fear=lerp(fear,target,Math.min(1,2*dt));
   shake=Math.max(0,shake-dt*1.4);
   fovK=lerp(fovK,(threatChase||finalHunt?3:0)+(player.sprint?2:0),Math.min(1,4*dt));
-  scene.fog.density=0.064+fear*0.012;
+  scene.fog.density=0.058+fear*0.012;
 }
 function audioFrame(dt){
   if(!AU.ctx)return;
@@ -2246,9 +2248,10 @@ $('go').addEventListener('click',()=>{NET.on=false;startGame();});
 $('retry').addEventListener('click',()=>{NET.on=false;startGame();});
 $('again').addEventListener('click',()=>{if(NET.on||NET.inRoom)leaveRoom();else startGame();});
 $('resume').addEventListener('click',resume);
-$('bright').addEventListener('input',e=>{bright=parseFloat(e.target.value)||1;ambient.intensity=0.45*bright;renderer.toneMappingExposure=1.15*Math.sqrt(bright);});
+$('bright').addEventListener('input',e=>{bright=parseFloat(e.target.value)||1;ambient.intensity=0.55*bright;renderer.toneMappingExposure=1.15*Math.sqrt(bright);});
 $('calm').addEventListener('change',e=>{calm=e.target.checked;});
 initMpUi();
 requestAnimationFrame(frame);
 })();
+
 </script>

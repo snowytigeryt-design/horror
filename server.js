@@ -13,6 +13,9 @@ const crypto = require('crypto');
 const { WebSocketServer } = require('ws');
 const Datastore = require('nedb');
 
+process.on('uncaughtException', (e) => console.error('[uncaught]', (e && e.stack) || e));
+process.on('unhandledRejection', (e) => console.error('[unhandled]', (e && e.stack) || e));
+
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -22,13 +25,21 @@ const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
-const players = new Datastore({ filename: path.join(DATA_DIR, 'players.db'), autoload: true });
-const games = new Datastore({ filename: path.join(DATA_DIR, 'games.db'), autoload: true });
-players.ensureIndex({ fieldName: 'uuid', unique: true });
-players.persistence.setAutocompactionInterval(10 * 60 * 1000);
-games.persistence.setAutocompactionInterval(10 * 60 * 1000);
+const onload = (name) => (err) => { if (err) console.error('[db] could not load ' + name, err); };
+const players = new Datastore({ filename: path.join(DATA_DIR, 'players.db'), autoload: true, onload: onload('players.db') });
+const games = new Datastore({ filename: path.join(DATA_DIR, 'games.db'), autoload: true, onload: onload('games.db') });
+try {
+  players.ensureIndex({ fieldName: 'uuid', unique: true });
+  players.persistence.setAutocompactionInterval(10 * 60 * 1000);
+  games.persistence.setAutocompactionInterval(10 * 60 * 1000);
+} catch (e) { console.error('[db] setup', e); }
 
-const p = (fn) => new Promise((res, rej) => fn((e, r) => (e ? rej(e) : res(r))));
+const DB_TIMEOUT = 4000;
+const p = (fn) => new Promise((res, rej) => {
+  const t = setTimeout(() => rej(new Error('db timeout')), DB_TIMEOUT);
+  try { fn((e, r) => { clearTimeout(t); if (e) rej(e); else res(r); }); }
+  catch (e) { clearTimeout(t); rej(e); }
+});
 const dbFindOne = (db, q) => p((cb) => db.findOne(q, cb));
 const dbInsert = (db, d) => p((cb) => db.insert(d, cb));
 const dbUpdate = (db, q, u) => p((cb) => db.update(q, u, {}, cb));
@@ -132,9 +143,9 @@ async function onMessage(c, m) {
     if (old && old !== c) { send(old, { t: 'error', msg: 'Signed in from another tab.' }); old.ws.close(); }
     c.uuid = uuid; c.name = cleanName(m.name); byUuid.set(uuid, c);
     try {
-      const rec = await loadPlayer(uuid, c.name);
+      const rec = await Promise.race([loadPlayer(uuid, c.name), new Promise((_, rej) => setTimeout(() => rej(new Error('player record is slow')), 1500))]);
       send(c, { t: 'welcome', name: c.name, stats: { games: rec.games, escapes: rec.escapes, deaths: rec.deaths, fuses: rec.fuses, bestMs: rec.bestMs } });
-    } catch (e) { logErr(e); send(c, { t: 'error', msg: 'Could not load your record.' }); }
+    } catch (e) { logErr(e); send(c, { t: 'welcome', name: c.name, stats: { games: 0, escapes: 0, deaths: 0, fuses: 0, bestMs: null }, noRecord: true }); }
     return;
   }
   if (!c.uuid) return;
@@ -163,10 +174,8 @@ async function onMessage(c, m) {
       if (!r || r.state !== 'lobby' || r.host !== c.pid) return;
       r.state = 'playing'; r.seed = crypto.randomInt(1, 2 ** 31); r.startedAt = now(); r.lastMon = now();
       for (const x of r.members.values()) { x.alive = true; x.escaped = false; x.joinedAt = now(); bump(x.uuid, { games: 1 }); }
-      try {
-        const g = await dbInsert(games, { code: r.code, seed: r.seed, startedAt: r.startedAt, endedAt: null, result: null, players: Array.from(r.members.values()).map((x) => x.name) });
-        r.gameId = g._id;
-      } catch (e) { logErr(e); }
+      dbInsert(games, { code: r.code, seed: r.seed, startedAt: r.startedAt, endedAt: null, result: null, players: Array.from(r.members.values()).map((x) => x.name) })
+        .then((g) => { r.gameId = g._id; }).catch(logErr);
       for (const x of r.members.values()) send(x, { t: 'start', seed: r.seed, you: x.pid });
       pushRoom(r);
       break;
@@ -215,14 +224,14 @@ async function onMessage(c, m) {
       if (!r || r.state !== 'playing' || c.escaped || r.fuses.size < NFUSE) return;
       c.escaped = true;
       const ms = now() - (c.joinedAt || r.startedAt);
-      try {
+      for (const x of r.members.values()) send(x, { t: 'escaped', id: c.pid, ms });
+      checkAllDone(r);
+      (async () => {
         const rec = await dbFindOne(players, { uuid: c.uuid });
         const set = {};
         if (rec && (rec.bestMs == null || ms < rec.bestMs)) set.bestMs = ms;
         await dbUpdate(players, { uuid: c.uuid }, Object.keys(set).length ? { $inc: { escapes: 1 }, $set: set } : { $inc: { escapes: 1 } });
-      } catch (e) { logErr(e); }
-      for (const x of r.members.values()) send(x, { t: 'escaped', id: c.pid, ms });
-      checkAllDone(r);
+      })().catch(logErr);
       break;
     }
     case 'say': {
@@ -240,13 +249,21 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 const server = http.createServer(async (req, res) => {
   let pathname;
   try { pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch (e) { res.writeHead(400); return res.end(); }
+  if (pathname === '/favicon.ico') { res.writeHead(204); return res.end(); }
+  if (pathname === '/vendor/three.min.js') {
+    return fs.readFile(path.join(__dirname, 'node_modules', 'three', 'build', 'three.min.js'), (err, buf) => {
+      if (err) { res.writeHead(404); return res.end(); }
+      res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=86400' });
+      res.end(buf);
+    });
+  }
   if (pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('ok'); }
   if (pathname === '/api/leaderboard') {
     try {
       const top = await dbTop();
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
       return res.end(JSON.stringify(top.map((x) => ({ name: x.name, escapes: x.escapes, bestMs: x.bestMs }))));
-    } catch (e) { logErr(e); res.writeHead(500); return res.end('[]'); }
+    } catch (e) { logErr(e); res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end('[]'); }
   }
   if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); return res.end(); }
   if (pathname === '/') pathname = '/index.html';

@@ -31,6 +31,17 @@ Rooms live in memory only. Run a single instance (do not scale to several), beca
 NeDB files belong to one process. On the free plan the service sleeps after about 15 minutes idle, which
 ends any open rooms.
 
+## If something looks wrong on Render
+
+- **Pinned to Node 22.** The original `nedb` package breaks on Node 23 and newer, so `package.json` asks for
+  `22.x`. If you ever see database errors in the Render logs, check the Node version first. A maintained
+  drop-in alternative is `@seald-io/nedb`.
+- **The server survives a database failure.** Players can still join, start and play. Records and the
+  leaderboard are just empty until the database works again. Errors are printed as `[db]` or `[uncaught]`.
+- **three.js is served by the server** from the `three` package (`/vendor/three.min.js`), with the cdnjs copy
+  as a fallback only. That avoids browser "Tracking Prevention" warnings about the CDN.
+- A `502` for a few seconds after a deploy, or after the free plan wakes up, is Render starting the app.
+
 ## How multiplayer works
 
 - **Player id:** the browser makes a random UUID on first visit and keeps it in localStorage. The server

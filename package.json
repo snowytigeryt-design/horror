@@ -4,11 +4,11 @@
   "description": "The Hollow Ward: co-op first-person horror, NeDB-backed lobby server",
   "main": "server.js",
   "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" },
+  "engines": { "node": "22.x" },
   "license": "MIT",
   "dependencies": {
-    "express": "^4.19.2",
     "nedb": "^1.8.0",
+    "three": "0.128.0",
     "ws": "^8.18.0"
   }
 }
