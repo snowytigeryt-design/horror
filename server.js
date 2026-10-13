@@ -20,6 +20,7 @@ const PORT = parseInt(process.env.PORT, 10) || 3000;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_PLAYERS = 4;
+const RECONNECT_GRACE_MS = 60 * 1000; /* how long a dropped player keeps their seat in a room */
 const NFUSE = 5;
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -140,12 +141,29 @@ async function onMessage(c, m) {
     if (typeof m.uuid !== 'string' || !UUID_RE.test(m.uuid)) { send(c, { t: 'error', msg: 'Bad player id.' }); return; }
     const uuid = m.uuid.toLowerCase();
     const old = byUuid.get(uuid);
-    if (old && old !== c) { send(old, { t: 'error', msg: 'Signed in from another tab.' }); old.ws.close(); }
+    let resumed = false;
+    if (old && old !== c) {
+      if (old.room) {
+        /* Same player is already in a room (dropped connection, or a half-open old socket):
+           hand the existing session to this new socket instead of kicking them out. */
+        clearTimeout(old.grace); old.grace = null; old.dead = false;
+        const oldWs = old.ws;
+        old.ws = c.ws; c.ws.client = old;
+        if (oldWs && oldWs !== c.ws && oldWs.readyState === 1) {
+          try { oldWs.send(JSON.stringify({ t: 'error', msg: 'Signed in from another tab.', kicked: true })); oldWs.close(); } catch (e) { /* ignore */ }
+        }
+        c = old; resumed = true;
+      } else {
+        send(old, { t: 'error', msg: 'Signed in from another tab.', kicked: true }); old.ws.close();
+      }
+    }
     c.uuid = uuid; c.name = cleanName(m.name); byUuid.set(uuid, c);
+    const inRoom = resumed && !!c.room;
     try {
       const rec = await Promise.race([loadPlayer(uuid, c.name), new Promise((_, rej) => setTimeout(() => rej(new Error('player record is slow')), 1500))]);
-      send(c, { t: 'welcome', name: c.name, stats: { games: rec.games, escapes: rec.escapes, deaths: rec.deaths, fuses: rec.fuses, bestMs: rec.bestMs } });
-    } catch (e) { logErr(e); send(c, { t: 'welcome', name: c.name, stats: { games: 0, escapes: 0, deaths: 0, fuses: 0, bestMs: null }, noRecord: true }); }
+      send(c, { t: 'welcome', name: c.name, resumed: inRoom, stats: { games: rec.games, escapes: rec.escapes, deaths: rec.deaths, fuses: rec.fuses, bestMs: rec.bestMs } });
+    } catch (e) { logErr(e); send(c, { t: 'welcome', name: c.name, resumed: inRoom, stats: { games: 0, escapes: 0, deaths: 0, fuses: 0, bestMs: null }, noRecord: true }); }
+    if (inRoom && c.room) pushRoom(c.room);
     return;
   }
   if (!c.uuid) return;
@@ -279,34 +297,59 @@ const server = http.createServer(async (req, res) => {
 /* ---------- websocket ---------- */
 const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 4096 });
 wss.on('connection', (ws) => {
-  const c = { ws, uuid: null, name: '', pid: null, room: null, alive: true, escaped: false, joinedAt: 0, hidden: -1, tokens: 80, last: now(), isAlive: true };
-  ws.on('pong', () => { c.isAlive = true; });
+  const c = { ws, uuid: null, name: '', pid: null, room: null, alive: true, escaped: false, joinedAt: 0, hidden: -1, tokens: 80, last: now(), isAlive: true, dead: false, grace: null };
+  ws.client = c; /* may be swapped to an older session when a player reconnects */
+  ws.missed = 0;
+  /* FIX: the pong must be recorded on the socket, because the heartbeat below checks the socket.
+     Before, it was recorded on the client object, so every connection was terminated after ~50s. */
+  ws.on('pong', () => { ws.missed = 0; });
   ws.on('message', (data) => {
+    ws.missed = 0; /* any traffic proves the connection is alive */
+    const cl = ws.client;
     const t = now();
-    c.tokens = Math.min(80, c.tokens + ((t - c.last) / 1000) * 60); c.last = t;
-    if (c.tokens < 1) return;
-    c.tokens -= 1;
+    cl.tokens = Math.min(80, cl.tokens + ((t - cl.last) / 1000) * 60); cl.last = t;
+    if (cl.tokens < 1) return;
+    cl.tokens -= 1;
     let m; try { m = JSON.parse(data.toString()); } catch (e) { return; }
-    onMessage(c, m).catch(logErr);
+    onMessage(cl, m).catch(logErr);
   });
-  ws.on('close', () => { if (c.uuid && byUuid.get(c.uuid) === c) byUuid.delete(c.uuid); if (c.room) leaveRoom(c); });
+  ws.on('close', () => {
+    const cl = ws.client;
+    if (cl.ws !== ws) return; /* this socket was already replaced by a newer one for the same player */
+    if (cl.uuid && cl.room) {
+      /* keep the player's seat for a short while so a dropped connection can resume instead of being kicked */
+      cl.dead = true;
+      clearTimeout(cl.grace);
+      cl.grace = setTimeout(() => {
+        cl.grace = null;
+        if (!cl.dead) return;
+        if (cl.uuid && byUuid.get(cl.uuid) === cl) byUuid.delete(cl.uuid);
+        if (cl.room) leaveRoom(cl);
+      }, RECONNECT_GRACE_MS);
+      return;
+    }
+    if (cl.uuid && byUuid.get(cl.uuid) === cl) byUuid.delete(cl.uuid);
+    if (cl.room) leaveRoom(cl);
+  });
   ws.on('error', () => {});
 });
 
-/* keep connections alive through Render's proxy; drop dead ones */
+/* keep connections alive through Render's proxy; drop dead ones (allows 2 missed pings before giving up) */
 setInterval(() => {
   for (const ws of wss.clients) {
-    if (ws.isAlive === false) { ws.terminate(); continue; }
-    ws.isAlive = false; try { ws.ping(); } catch (e) { /* ignore */ }
+    if (ws.missed >= 2) { ws.terminate(); continue; }
+    ws.missed = (ws.missed || 0) + 1; try { ws.ping(); } catch (e) { /* ignore */ }
   }
-}, 25000);
+}, 20000);
 /* host watchdog: if the host's tab stops sending monster updates (background tab), hand the role to someone else */
 setInterval(() => {
   const t = now();
   for (const r of rooms.values()) {
     if (r.state === 'playing' && r.members.size > 1 && t - r.lastMon > 4000) {
       const ids = Array.from(r.members.keys()), i = ids.indexOf(r.host);
-      r.host = ids[(i + 1) % ids.length]; r.lastMon = t; pushRoom(r);
+      let next = r.host;
+      for (let k = 1; k <= ids.length; k++) { const cand = ids[(i + k) % ids.length]; if (!r.members.get(cand).dead) { next = cand; break; } }
+      r.host = next; r.lastMon = t; pushRoom(r);
     }
     if (r.state !== 'playing' && t - r.created > 6 * 3600 * 1000 && r.members.size === 0) rooms.delete(r.code);
   }

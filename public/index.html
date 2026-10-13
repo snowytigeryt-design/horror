@@ -1735,7 +1735,7 @@ XS.push(['falsealarm',10,scareFalseAlarm],['shift',7,scareShift]);
 
 /* ---------- multiplayer: rooms over WebSocket. The room host's browser runs the monster; everyone else mirrors it. ---------- */
 const MP_AVAILABLE=true;
-const NET={on:false,inRoom:false,ws:null,pid:null,host:false,code:'',members:new Map(),remotes:new Map(),seed:0,uuid:'',name:'',stats:null,snap:null,initFuses:[],slots:[],group:null,t:0,partyT:0,ended:false,wait:null};
+const NET={on:false,inRoom:false,ws:null,pid:null,host:false,code:'',members:new Map(),remotes:new Map(),seed:0,uuid:'',name:'',stats:null,snap:null,initFuses:[],slots:[],group:null,t:0,partyT:0,ended:false,wait:null,reconn:false,kicked:false,lastRx:0};
 const EMOTES=['Over here!','Run!','Stay quiet...'];
 function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
 function withSeed(seed,fn){const o=Math.random;Math.random=mulberry(seed);try{return fn();}finally{Math.random=o;}}
@@ -1761,18 +1761,45 @@ function setMpMsg(t){const m=$('mp-msg');m.textContent=t||'';m.hidden=!t;}
 function netSend(o){if(NET.ws&&NET.ws.readyState===1)NET.ws.send(JSON.stringify(o));}
 function netConnect(then){
   if(NET.ws&&NET.ws.readyState===1&&NET.stats){then();return;}
-  if(NET.ws&&NET.ws.readyState===0){NET.wait=then;return;}
-  setMpMsg('Connecting...');
+  if(NET.ws&&NET.ws.readyState<=1&&!NET.stats){NET.wait=then;return;}
+  if(!NET.reconn)setMpMsg('Connecting...');
   NET.name=($('pname').value||'').replace(/[^\w \-]/g,'').trim().slice(0,16);lsSet('hw_name',NET.name);
   let ws;
   try{ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws');}catch(e){setMpMsg('Multiplayer is not available here.');return;}
   NET.ws=ws;NET.wait=then;NET.stats=null;
   ws.onopen=()=>{netSend({t:'hello',uuid:NET.uuid,name:NET.name});};
-  ws.onmessage=e=>{let m;try{m=JSON.parse(e.data);}catch(_){return;}netMsg(m);};
-  ws.onclose=()=>{if(NET.ws!==ws)return;NET.ws=null;NET.stats=null;if(NET.on||NET.inRoom)leaveRoom('Connection lost.',true);else setMpMsg('Could not reach the server.');};
+  ws.onmessage=e=>{NET.lastRx=Date.now();let m;try{m=JSON.parse(e.data);}catch(_){return;}netMsg(m);};
+  ws.onclose=()=>{
+    if(NET.ws!==ws)return;NET.ws=null;NET.stats=null;
+    if(NET.on||NET.inRoom){if(NET.kicked)leaveRoom('Signed in from another tab.',true);else netReconnect();}
+    else setMpMsg('Could not reach the server.');
+  };
   ws.onerror=()=>{};
 }
-setInterval(()=>{if(NET.ws&&NET.ws.readyState===1)netSend({t:'ping'});},20000);
+/* A dropped connection no longer throws you out: keep the game running and retry for about 45 seconds.
+   The server holds your seat for 60 seconds and hands it back when you reconnect. */
+function netReconnect(){
+  if(NET.reconn)return;
+  NET.reconn=true;let n=0;
+  say('Connection lost. Reconnecting...',4000);
+  const tick=()=>{
+    if(!NET.reconn)return;
+    if(NET.kicked||!(NET.on||NET.inRoom)){NET.reconn=false;return;}
+    if(NET.ws&&NET.ws.readyState===1&&NET.stats)return;
+    if(++n>20){NET.reconn=false;leaveRoom('Connection lost.',true);return;}
+    netConnect(()=>{});
+    setTimeout(tick,Math.min(500*n,3000));
+  };
+  tick();
+}
+/* ping, and drop a connection that has gone silent so the reconnect logic can take over */
+NET.lastRx=Date.now();
+setInterval(()=>{
+  if(NET.ws&&NET.ws.readyState===1){
+    if(NET.lastRx&&Date.now()-NET.lastRx>100000){try{NET.ws.close();}catch(e){}return;}
+    netSend({t:'ping'});
+  }
+},20000);
 
 function fmtMs(ms){return ms==null?'-':fmt(ms);}
 function showStats(){
@@ -1794,8 +1821,11 @@ function memberName(id){const m=NET.members.get(id);return m?m.name:'Someone';}
 /* ---------- messages ---------- */
 function netMsg(m){
   switch(m.t){
-    case 'welcome':NET.stats=m.stats;showStats();setMpMsg('');if(NET.wait){const f=NET.wait;NET.wait=null;f();}break;
-    case 'error':setMpMsg(m.msg||'Something went wrong.');if(NET.on)say(m.msg||'',3000);break;
+    case 'welcome':
+      NET.stats=m.stats;showStats();setMpMsg('');
+      if(NET.reconn){NET.reconn=false;if(!m.resumed){leaveRoom('Your session expired. Please rejoin.',true);break;}if(NET.on)say('Reconnected.',2000);}
+      if(NET.wait){const f=NET.wait;NET.wait=null;f();}break;
+    case 'error':if(m.kicked)NET.kicked=true;setMpMsg(m.msg||'Something went wrong.');if(NET.on)say(m.msg||'',3000);break;
     case 'room':onRoom(m);break;
     case 'start':NET.ended=false;beginMpGame(m.seed,[]);break;
     case 'p':{
@@ -1837,6 +1867,8 @@ function onRoom(m){
   if(!NET.on&&m.state==='playing'){NET.ended=false;beginMpGame(m.seed,m.fuses||[]);return;}
   if(NET.on){
     netSyncRemotes();
+    /* catch up on any fuses taken while we were disconnected */
+    if(m.fuses)for(const i of m.fuses){if(fuses[i]&&!fuses[i].taken)takeFuse(fuses[i],null,null,true);}
     if(NET.host&&!wasHost){M.path=[];if(M.active&&M.state==='chase')M.lost=0;}
   }
 }
@@ -1973,6 +2005,7 @@ function respawnLocal(){
 function leaveRoom(msg,fromClose){
   if(!fromClose)netSend({t:'leave'});
   netClearRemotes();
+  NET.reconn=false;NET.kicked=false;
   NET.on=false;NET.inRoom=false;NET.host=false;NET.code='';NET.snap=null;NET.members=new Map();
   if(state!=='title'){state='title';}
   el.hud.hidden=true;$('party').hidden=true;el.siren.classList.remove('on');

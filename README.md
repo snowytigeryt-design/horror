@@ -73,3 +73,12 @@ lie about their own position. This is a friends game, not a competitive one.
 - `GET /` the game
 - `GET /healthz` returns `ok`
 - `GET /api/leaderboard` top 10 by escapes
+
+## Connection drops and reconnecting
+
+- If a player's connection drops, the server keeps their seat in the room for 60 seconds. The game client
+  automatically reconnects (retrying for about 45 seconds) and picks up where it left off, including any
+  fuses taken in the meantime. Only after that does the player go back to the title screen.
+- Heartbeat: the server pings every 20 seconds and only drops a socket after 2 missed pings.
+- If the same player id joins from a second tab while in a room, the session moves to the new tab and the
+  old tab is told it was signed in elsewhere (it does not fight to reconnect).
