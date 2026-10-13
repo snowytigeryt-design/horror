@@ -1,8 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>The Hollow Ward</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IM+Fell+English+SC&family=Special+Elite&display=swap">
 <style>
+[hidden]{display:none!important}
 /* Layout: full-bleed first-person view; HUD hugs the edges; one centered panel for title, pause, death, win. */
 :root{--bg:#050403;--ink:#d8d0bf;--dim:#8a8273;--blood:#a3241a;--amber:#d9a35a;color-scheme:dark}
 html{box-sizing:border-box;height:100%}
@@ -65,6 +71,9 @@ input[type=text]{font:inherit;color:var(--ink);background:rgba(255,255,255,.05);
 #err{position:absolute;left:16px;right:16px;top:40%;text-align:center;color:var(--blood)}
 @media (prefers-reduced-motion:reduce){h1,#siren.on{animation:none}}
 </style>
+<style>html{color-scheme:dark;height:100%}body{margin:0}</style>
+</head>
+<body>
 <div id="stage">
 <canvas id="gl"></canvas>
 <div id="vig"></div>
@@ -2255,3 +2264,5 @@ requestAnimationFrame(frame);
 })();
 
 </script>
+</body>
+</html>
