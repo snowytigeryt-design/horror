@@ -1,0 +1,64 @@
+# The Hollow Ward (co-op)
+
+First-person horror. Find five fuses, restore the power, leave through the east door. Solo, or 2 to 4 players
+in a room. Everything is one small Node server plus one HTML file.
+
+## Run it locally
+
+    npm install
+    npm start
+
+Open http://localhost:3000. Open it in a second window to test a room.
+
+## Deploy on Render
+
+1. Push this folder to a GitHub repo.
+2. Render dashboard: New > Web Service > pick the repo.
+3. Runtime `Node`, Build Command `npm install`, Start Command `npm start`.
+4. Health Check Path `/healthz`.
+5. Deploy. Render sets `PORT` for you, and WebSockets work on the same URL with no extra setup.
+
+Or use the included `render.yaml` as a Blueprint.
+
+### Keeping player records
+
+NeDB stores data in two files (`players.db`, `games.db`) inside `DATA_DIR` (default `./data`).
+On Render the normal filesystem is erased on every deploy and restart, so records reset.
+To keep them: add a Persistent Disk (paid instances), mount it at `/var/data`, and set the environment
+variable `DATA_DIR=/var/data`.
+
+Rooms live in memory only. Run a single instance (do not scale to several), because both the rooms and the
+NeDB files belong to one process. On the free plan the service sleeps after about 15 minutes idle, which
+ends any open rooms.
+
+## How multiplayer works
+
+- **Player id:** the browser makes a random UUID on first visit and keeps it in localStorage. The server
+  keys a player record on it (name, escapes, deaths, fuses, best time). There are no accounts. The UUID is
+  the only credential, so it is never sent to other players; they get a short per-room id instead. Clearing
+  site data makes you a new player.
+- **Rooms:** Create room gives a 4 letter code. Quick match drops you into any open public room. Anyone can
+  join a run in progress with the code.
+- **Same world:** the server picks a seed when the host starts, and every browser builds the same maze,
+  fuses and lockers from it.
+- **Shared:** fuses (one player takes it, it is gone for everyone), the main stalker, and player positions.
+  The room host's browser runs the stalker's AI and the server relays it. If the host leaves, or their tab
+  goes to the background and stops updating for 4 seconds, the role passes to another player automatically.
+- **Personal:** the jumpscares, crawlers, brutes and wall scares are rolled per player, so each player is
+  haunted separately.
+- **Death:** a caught player can "Rise again" at the entrance. Fuses already taken stay taken.
+- **Quick calls:** keys 1, 2, 3 send "Over here!", "Run!", "Stay quiet...".
+- **No pausing** in co-op, because the world keeps running for everyone.
+
+## Server messages
+
+All JSON over `/ws`. Client to server: `hello create quick join leave start p mon fuse kill died respawn
+escaped say ping`. Server to client: `welcome room start p mon fuse kill died respawn escaped say left end
+error pong`. Moves, fuses and escapes are checked for shape and sanity, but a determined cheater can still
+lie about their own position. This is a friends game, not a competitive one.
+
+## Endpoints
+
+- `GET /` the game
+- `GET /healthz` returns `ok`
+- `GET /api/leaderboard` top 10 by escapes

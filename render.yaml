@@ -1,0 +1,19 @@
+# Optional Render Blueprint. You can also create the service by hand (see README.md).
+services:
+  - type: web
+    name: hollow-ward
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    # NeDB writes its files to DATA_DIR. On Render the default filesystem is wiped on every
+    # deploy and restart. To keep player records, add a persistent disk (paid instances only),
+    # mount it at /var/data, and set DATA_DIR to that path:
+    #
+    # disk:
+    #   name: ward-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    # envVars:
+    #   - key: DATA_DIR
+    #     value: /var/data
